@@ -1,88 +1,114 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { Register } from './dto/register.dto.js';
-import * as bcrypt from "bcrypt"
 import { Login } from './dto/login.dto.js';
+
+const publicUserFields = { id: true, nickname: true, age: true } as const;
 
 @Injectable()
 export class UsersService {
-  constructor(private prisma: PrismaService) {}
-  async getAll(): Promise<any[]> {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwt: JwtService,
+  ) {}
+
+  async getAll() {
     return this.prisma.user.findMany({
-        orderBy: {
-            id: "asc"
-        }
+      orderBy: { id: 'asc' },
+      select: publicUserFields,
     });
   }
+
   async getOne(id: number) {
-    return this.prisma.user.findUnique({ where: { id } });
-  }
-  async register(body: Register) {
-    let {nickname, age, password} = body
     const user = await this.prisma.user.findUnique({
-        where: {nickname: nickname}
-    })
-    if(user){
-        throw new BadRequestException("This nickname has been already taken by someone else...");
-    }
-    const hashedPassword = await bcrypt.hash(
-        body.password,
-        10
-    )
-    await this.prisma.user.create({
-      data: {
-        nickname: body.nickname,
-        age: body.age,
-        password: hashedPassword
-      }
+      where: { id },
+      select: publicUserFields,
     });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    return user;
+  }
+
+  async register(body: Register) {
+    const { nickname, age = 0, password } = body;
+    const user = await this.prisma.user.findUnique({ where: { nickname } });
+
+    if (user) {
+      throw new BadRequestException('This nickname is already taken');
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    await this.prisma.user.create({
+      data: { nickname, age, password: hashedPassword },
+    });
+
     return { message: 'You have successfully registered in our platform🔥!' };
   }
+
   async login(body: Login) {
-    const user1 = await this.prisma.user.findUnique({ where: { nickname: body.nickname } });
-    if (!user1) {
-      throw new BadRequestException('User not found');
+    const user = await this.prisma.user.findUnique({
+      where: { nickname: body.nickname },
+    });
+
+    if (!user || !(await bcrypt.compare(body.password, user.password))) {
+      throw new UnauthorizedException('Nickname or password is incorrect');
     }
-    const result = await bcrypt.compare(body.password, user1.password);
-    if(!result) {
-      throw new BadRequestException("Nickname or password is incorrect...");
-    }
+
+    const accessToken = await this.jwt.signAsync({
+      sub: user.id,
+      nickname: user.nickname,
+    });
+
     return {
-      Message: 'Login successfull. Below is information about you.',
+      Message: 'Login successful. Below is information about you.',
       Account: {
-        Id: `${user1.id}`,
-        Nickname: `${user1.nickname}`,
-        Age: `${user1.age ? user1.age : "Not set"}`
-      }
+        Id: `${user.id}`,
+        Nickname: user.nickname,
+        Age: `${user.age}`,
+      },
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: 3600,
     };
   }
-  async update(id: number, body: any) {
-    const user = await this.prisma.user.findUnique({
-        where: {id}
-    })
-    if(user){
-        if(body.nickname === user.nickname){
 
-        }else{
-            throw new BadRequestException("This nickname has been already taken by someone else...");
-        }
+  async update(id: number, body: Register) {
+    const currentUser = await this.getOne(id);
+    const { nickname, age = 0, password } = body;
+
+    if (nickname !== currentUser.nickname) {
+      const user = await this.prisma.user.findUnique({ where: { nickname } });
+
+      if (user) {
+        throw new BadRequestException('This nickname is already taken');
+      }
     }
-    const hashedPassword = await bcrypt.hash(
-        body.password,
-        10
-    )
-    await this.prisma.user.update({ 
-        where: { id },
-        data: {
-            nickname: body.nickname,
-            age: body.age,
-            password: hashedPassword
-        } 
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    await this.prisma.user.update({
+      where: { id },
+      data: { nickname, age, password: hashedPassword },
     });
+
     return { message: 'User has been successfully updated!' };
   }
+
   async delete(id: number) {
+    await this.getOne(id);
     await this.prisma.user.delete({ where: { id } });
+
     return { message: 'User has been successfully deleted!' };
   }
 }
